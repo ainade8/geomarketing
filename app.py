@@ -10,41 +10,11 @@ from test import calcul_principal  # ton module métier
 
 # ---------- Utilitaires communs ----------
 
-@st.cache_data(show_spinner=False)
-def geocode_google(address: str):
-    """
-    Géocode une adresse via l'API Google Geocoding.
-    Retourne (lat, lon) ou None si échec.
-    """
-    api_key = st.secrets.get("GOOGLE_API_KEY", None)
-    if api_key is None:
-        raise ValueError("La clé GOOGLE_API_KEY n'est pas définie dans les secrets Streamlit.")
-
-    url = "https://maps.googleapis.com/maps/api/geocode/json"
-    params = {
-        "address": address,
-        "key": api_key
-    }
-
-    resp = requests.get(url, params=params)
-    data = resp.json()
-
-    # 🔍 DEBUG TEMPORAIRE
-    st.write("DEBUG status Google:", data.get("status"))
-    st.write("DEBUG message:", data.get("error_message", "(aucun)"))
-
-    if data.get("status") != "OK" or not data.get("results"):
-        return None
-
-    location = data["results"][0]["geometry"]["location"]
-    return (location["lat"], location["lng"])
-
-
 def haversine_distance(lat1, lon1, lat2, lon2):
     """
     Distance en km entre 2 points (latitude/longitude en degrés).
     """
-    R = 6371  # rayon de la Terre en km
+    R = 6371  # km
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -54,6 +24,62 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
     return R * c
+
+
+@st.cache_data(show_spinner=False)
+def directions_google(origin: str, destination: str, mode: str = "driving"):
+    """
+    Appelle l'API Google Directions pour obtenir un itinéraire.
+    mode: "driving" ou "transit"
+    Retourne un dict avec distance_km, duration_min, start/end address & coords,
+    + status brut et éventuel message d'erreur pour debug.
+    """
+    api_key = st.secrets.get("GOOGLE_API_KEY", None)
+    if api_key is None:
+        raise ValueError("La clé GOOGLE_API_KEY n'est pas définie dans les secrets Streamlit.")
+
+    url = "https://maps.googleapis.com/maps/api/directions/json"
+    params = {
+        "origin": origin,
+        "destination": destination,
+        "mode": mode,
+        "key": api_key
+        # Pour transit, Google prend "now" par défaut si pas de departure_time
+    }
+
+    resp = requests.get(url, params=params)
+    data = resp.json()
+
+    status = data.get("status")
+    error_message = data.get("error_message", None)
+
+    if status != "OK" or not data.get("routes"):
+        return {
+            "ok": False,
+            "status": status,
+            "error_message": error_message,
+        }
+
+    leg = data["routes"][0]["legs"][0]
+
+    distance_m = leg["distance"]["value"]       # mètres
+    duration_s = leg["duration"]["value"]       # secondes
+    start_address = leg["start_address"]
+    end_address = leg["end_address"]
+    start_location = leg["start_location"]      # {"lat": ..., "lng": ...}
+    end_location = leg["end_location"]
+
+    return {
+        "ok": True,
+        "status": status,
+        "error_message": error_message,
+        "distance_km": distance_m / 1000.0,
+        "duration_min": duration_s / 60.0,
+        "start_address": start_address,
+        "end_address": end_address,
+        "start_location": start_location,
+        "end_location": end_location,
+    }
 
 
 # ---------- Sous-app 1 : Calcul principal ----------
@@ -91,10 +117,10 @@ def app_calcul_principal():
             st.write(result)
 
 
-# ---------- Sous-app 2 : Distance entre 2 adresses (Google Maps) ----------
+# ---------- Sous-app 2 : Distance entre 2 adresses (voiture / transports) ----------
 
 def app_distance_adresses():
-    st.header("📍 Outil 2 – Distance entre 2 adresses (Google Maps)")
+    st.header("🗺️ Outil 2 – Itinéraire entre 2 adresses (Google Maps)")
 
     st.markdown("**Adresse de départ (A)**")
     addr1 = st.text_input(
@@ -110,38 +136,82 @@ def app_distance_adresses():
         key="addrB"
     )
 
-    if st.button("Calculer la distance", key="btn_distance_adresses"):
+    mode_label = st.selectbox(
+        "Mode de transport",
+        ["🚗 Voiture", "🚆 Transports en commun"],
+        index=0,
+        key="mode_select"
+    )
+
+    # Traduction label -> mode API Google
+    mode_api = "driving" if "Voiture" in mode_label else "transit"
+
+    if st.button("Calculer l’itinéraire", key="btn_distance_adresses"):
         if not addr1 or not addr2:
             st.error("Merci de renseigner les deux adresses.")
             return
 
         try:
-            with st.spinner("Géocodage des adresses via Google..."):
-                coords1 = geocode_google(addr1)
-                coords2 = geocode_google(addr2)
+            with st.spinner(f"Appel à Google Directions ({mode_label})..."):
+                res = directions_google(addr1, addr2, mode=mode_api)
         except ValueError as e:
             st.error(str(e))
             return
 
-        if coords1 is None:
-            st.error("Impossible de géocoder l'adresse A. Essaie d'ajouter la ville / le pays.")
+        if not res.get("ok"):
+            status = res.get("status")
+            error_msg = res.get("error_message", "(aucun message)")
+
+            # Cas particulier : pas de transports en commun dispo
+            if mode_api == "transit" and status == "ZERO_RESULTS":
+                st.warning(
+                    "Aucun itinéraire en transports en commun n’a été trouvé "
+                    "entre ces deux adresses (ZERO_RESULTS)."
+                )
+            else:
+                st.error(
+                    f"Impossible de récupérer un itinéraire.\n\n"
+                    f"Status Google : {status}\n"
+                    f"Message : {error_msg}"
+                )
             return
-        if coords2 is None:
-            st.error("Impossible de géocoder l'adresse B. Essaie d'ajouter la ville / le pays.")
-            return
 
-        lat1, lon1 = coords1
-        lat2, lon2 = coords2
+        dist_km = res["distance_km"]
+        dur_min = res["duration_min"]
+        start_address = res["start_address"]
+        end_address = res["end_address"]
+        start_loc = res["start_location"]
+        end_loc = res["end_location"]
 
-        dist_km = haversine_distance(lat1, lon1, lat2, lon2)
+        # Distance "vol d’oiseau" en bonus
+        dist_crow = haversine_distance(
+            start_loc["lat"], start_loc["lng"],
+            end_loc["lat"], end_loc["lng"]
+        )
 
-        st.success(f"Distance approximative (vol d’oiseau) : **{dist_km:.2f} km**")
+        if mode_api == "driving":
+            mode_txt = "en voiture"
+            icon = "🚗"
+        else:
+            mode_txt = "en transports en commun"
+            icon = "🚆"
 
-        with st.expander("Détails des coordonnées"):
-            st.write(f"Adresse A : {addr1}")
-            st.write(f"→ lat = {lat1:.6f}, lon = {lon1:.6f}")
-            st.write(f"Adresse B : {addr2}")
-            st.write(f"→ lat = {lat2:.6f}, lon = {lon2:.6f}")
+        st.success(
+            f"{icon} Distance {mode_txt} : **{dist_km:.2f} km**  "
+            f"(~ **{dur_min:.0f} minutes** selon Google)"
+        )
+        st.info(
+            f"Distance approximative \"vol d’oiseau\" : **{dist_crow:.2f} km**"
+        )
+
+        with st.expander("Détails de l’itinéraire et des coordonnées"):
+            st.write("**Adresse de départ (interprétée par Google)**")
+            st.write(start_address)
+            st.write(f"→ lat = {start_loc['lat']:.6f}, lon = {start_loc['lng']:.6f}")
+
+            st.write("**Adresse d’arrivée (interprétée par Google)**")
+            st.write(end_address)
+            st.write(f"→ lat = {end_loc['lat']:.6f}, lon = {end_loc['lng']:.6f}")
 
 
 # ---------- App principale avec menu ----------
@@ -152,7 +222,7 @@ def main():
     st.sidebar.title("Menu")
     page = st.sidebar.radio(
         "Choisir une application",
-        ["🏠 Accueil", "🧮 Calcul principal", "📍 Distance entre 2 adresses"]
+        ["🏠 Accueil", "🧮 Calcul principal", "🗺️ Itinéraire entre 2 adresses"]
     )
 
     if page == "🏠 Accueil":
@@ -160,13 +230,13 @@ def main():
         st.write(
             "Choisis un outil dans le menu de gauche :\n"
             "- **🧮 Calcul principal** : outil avec paramètres + fichier Excel\n"
-            "- **📍 Distance entre 2 adresses** : calcul de distance en km via Google Maps"
+            "- **🗺️ Itinéraire entre 2 adresses** : distance et durée en voiture ou en transports en commun\n"
         )
 
     elif page == "🧮 Calcul principal":
         app_calcul_principal()
 
-    elif page == "📍 Distance entre 2 adresses":
+    elif page == "🗺️ Itinéraire entre 2 adresses":
         app_distance_adresses()
 
 
