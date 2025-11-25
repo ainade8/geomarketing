@@ -588,6 +588,7 @@ def main():
             "- **🧮 Calcul principal** : outil avec paramètres + fichier Excel\n"
             "- **🗺️ Itinéraire entre 2 adresses** : distance & durée en voiture ou transports en commun\n"
             "- **📄 Géocoder un fichier d’adresses** : ajoute Latitude/Longitude à un Excel"
+            "- **🏢 Matrice de trajets entre agences** : calcule tous les trajets entre agences d’un fichier Excel"
         )
 
     elif page == "🧮 Calcul principal":
