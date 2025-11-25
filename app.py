@@ -1,15 +1,44 @@
 import math
 import tempfile
+import requests
 
 import pandas as pd
 import streamlit as st
-from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut
 
-from test import calcul_principal  # ton module existant avec la logique métier
+from test import calcul_principal  # ton module métier
 
 
-# ---------- Outils communs ----------
+# ---------- Utilitaires communs ----------
+
+@st.cache_data(show_spinner=False)
+def geocode_google(address: str):
+    """
+    Géocode une adresse via l'API Google Geocoding.
+    Retourne (lat, lon) ou None si échec.
+    """
+    api_key = st.secrets.get("GOOGLE_API_KEY", None)
+    if api_key is None:
+        raise ValueError("La clé GOOGLE_API_KEY n'est pas définie dans les secrets Streamlit.")
+
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {
+        "address": address,
+        "key": api_key
+    }
+
+    resp = requests.get(url, params=params)
+    data = resp.json()
+
+    # 🔍 DEBUG TEMPORAIRE
+    st.write("DEBUG status Google:", data.get("status"))
+    st.write("DEBUG message:", data.get("error_message", "(aucun)"))
+
+    if data.get("status") != "OK" or not data.get("results"):
+        return None
+
+    location = data["results"][0]["geometry"]["location"]
+    return (location["lat"], location["lng"])
+
 
 def haversine_distance(lat1, lon1, lat2, lon2):
     """
@@ -27,23 +56,7 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     return R * c
 
 
-@st.cache_data(show_spinner=False)
-def geocode_address(address: str):
-    """
-    Géocode une adresse texte → (lat, lon) ou None si échec.
-    Utilise Nominatim (OpenStreetMap).
-    """
-    geolocator = Nominatim(user_agent="geomarketing_app")
-    try:
-        location = geolocator.geocode(address)
-        if location is None:
-            return None
-        return (location.latitude, location.longitude)
-    except GeocoderTimedOut:
-        return None
-
-
-# ---------- Sous-app 1 : ton outil existant ----------
+# ---------- Sous-app 1 : Calcul principal ----------
 
 def app_calcul_principal():
     st.header("🧮 Outil 1 – Calcul principal")
@@ -59,8 +72,7 @@ def app_calcul_principal():
         key="file_calcul_principal"
     )
 
-    # Bouton d'exécution
-    if st.button("Lancer le calcul"):
+    if st.button("Lancer le calcul", key="btn_calcul_principal"):
         fichier_path = None
 
         # Si un fichier est uploadé, on le sauvegarde en temporaire
@@ -73,17 +85,16 @@ def app_calcul_principal():
         result = calcul_principal(param1, param2, fichier_path)
 
         st.subheader("Résultat")
-        # Gestion simple de différents types de retour
         if isinstance(result, pd.DataFrame):
             st.dataframe(result)
         else:
             st.write(result)
 
 
-# ---------- Sous-app 2 : distance entre 2 adresses ----------
+# ---------- Sous-app 2 : Distance entre 2 adresses (Google Maps) ----------
 
 def app_distance_adresses():
-    st.header("📍 Outil 2 – Distance entre 2 adresses")
+    st.header("📍 Outil 2 – Distance entre 2 adresses (Google Maps)")
 
     st.markdown("**Adresse de départ (A)**")
     addr1 = st.text_input(
@@ -99,14 +110,18 @@ def app_distance_adresses():
         key="addrB"
     )
 
-    if st.button("Calculer la distance"):
+    if st.button("Calculer la distance", key="btn_distance_adresses"):
         if not addr1 or not addr2:
             st.error("Merci de renseigner les deux adresses.")
             return
 
-        with st.spinner("Géocodage des adresses..."):
-            coords1 = geocode_address(addr1)
-            coords2 = geocode_address(addr2)
+        try:
+            with st.spinner("Géocodage des adresses via Google..."):
+                coords1 = geocode_google(addr1)
+                coords2 = geocode_google(addr2)
+        except ValueError as e:
+            st.error(str(e))
+            return
 
         if coords1 is None:
             st.error("Impossible de géocoder l'adresse A. Essaie d'ajouter la ville / le pays.")
@@ -120,7 +135,7 @@ def app_distance_adresses():
 
         dist_km = haversine_distance(lat1, lon1, lat2, lon2)
 
-        st.success(f"Distance approximative : **{dist_km:.2f} km**")
+        st.success(f"Distance approximative (vol d’oiseau) : **{dist_km:.2f} km**")
 
         with st.expander("Détails des coordonnées"):
             st.write(f"Adresse A : {addr1}")
@@ -145,7 +160,7 @@ def main():
         st.write(
             "Choisis un outil dans le menu de gauche :\n"
             "- **🧮 Calcul principal** : outil avec paramètres + fichier Excel\n"
-            "- **📍 Distance entre 2 adresses** : calcul de distance en km"
+            "- **📍 Distance entre 2 adresses** : calcul de distance en km via Google Maps"
         )
 
     elif page == "🧮 Calcul principal":
@@ -157,3 +172,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
