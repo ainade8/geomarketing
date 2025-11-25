@@ -339,7 +339,8 @@ def app_matrice_agences():
         "1. Charge un fichier Excel avec une colonne d’adresses\n"
         "2. Optionnel : indique une colonne de noms d’agence\n"
         "3. Choisis le mode (voiture, transports, ou le plus rapide)\n"
-        "4. L’outil calcule tous les trajets entre toutes les agences (y compris agence → elle-même)"
+        "4. L’outil calcule tous les trajets entre toutes les agences (y compris agence → elle-même)\n"
+        "5. Affiche une carte des agences géolocalisées"
     )
 
     uploaded_file = st.file_uploader(
@@ -415,7 +416,7 @@ def app_matrice_agences():
             )
             return
 
-        # On prépare une petite table des agences
+        # Petite table des agences (adresses + label)
         work = df[[col_addr]].copy()
         if has_name:
             work[col_name] = df[col_name]
@@ -432,6 +433,31 @@ def app_matrice_agences():
 
         st.info(f"{n} agences détectées. Calcul de {n*n} paires (y compris agence → elle-même).")
 
+        # 🔹 Étape 1 : géocoder les agences une fois pour la carte
+        work["Latitude"] = None
+        work["Longitude"] = None
+
+        st.write("Géocodage des agences pour affichage sur la carte...")
+        progress_geo = st.progress(0)
+        for i in range(n):
+            addr = str(work.at[i, col_addr])
+            lat, lon = geocode_google(addr)
+            work.at[i, "Latitude"] = lat
+            work.at[i, "Longitude"] = lon
+            progress_geo.progress((i + 1) / n)
+        progress_geo.empty()
+
+        # Filtrer celles qui ont bien des coordonnées
+        geo_ok = work.dropna(subset=["Latitude", "Longitude"]).copy()
+
+        if len(geo_ok) == 0:
+            st.warning("Aucune agence n’a pu être géocodée, carte non affichée.")
+        else:
+            st.subheader("Carte des agences géocodées")
+            map_df = geo_ok.rename(columns={"Latitude": "lat", "Longitude": "lon"})
+            st.map(map_df[["lat", "lon"]])  # carte simple avec tous les points
+
+        # 🔹 Étape 2 : calcul de la matrice des trajets
         rows = []
         total_pairs = n * n
         done = 0
@@ -459,7 +485,6 @@ def app_matrice_agences():
                         "Duree_min": 0.0,
                     })
                 else:
-                    # Selon le mode global : une seule API, ou comparaison des deux
                     if global_mode == "driving_only":
                         res = directions_google(origin_addr, dest_addr, mode="driving")
                         if res.get("ok"):
@@ -530,7 +555,7 @@ def app_matrice_agences():
                             "Agence_destination": dest_label,
                             "Adresse_origine": origin_addr,
                             "Adresse_destination": dest_addr,
-                            "Mode": best_mode,          # Voiture / Transports / None si rien trouvé
+                            "Mode": best_mode,
                             "Distance_km": best_dist,
                             "Duree_min": best_dur,
                         })
@@ -561,6 +586,7 @@ def app_matrice_agences():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="download_matrice_agences"
         )
+
 
 
 
