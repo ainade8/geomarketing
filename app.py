@@ -1,5 +1,6 @@
 import math
 import tempfile
+import io
 import requests
 
 import pandas as pd
@@ -44,7 +45,6 @@ def directions_google(origin: str, destination: str, mode: str = "driving"):
         "destination": destination,
         "mode": mode,
         "key": api_key
-        # Pour transit, Google prend "now" par défaut si pas de departure_time
     }
 
     resp = requests.get(url, params=params)
@@ -82,6 +82,33 @@ def directions_google(origin: str, destination: str, mode: str = "driving"):
     }
 
 
+@st.cache_data(show_spinner=False)
+def geocode_google(address: str):
+    """
+    Géocode une adresse via l'API Google Geocoding.
+    Retourne (lat, lon) ou (None, None) si échec.
+    """
+    api_key = st.secrets.get("GOOGLE_API_KEY", None)
+    if api_key is None:
+        raise ValueError("La clé GOOGLE_API_KEY n'est pas définie dans les secrets Streamlit.")
+
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {
+        "address": address,
+        "key": api_key
+    }
+
+    resp = requests.get(url, params=params)
+    data = resp.json()
+
+    status = data.get("status")
+    if status != "OK" or not data.get("results"):
+        return None, None
+
+    location = data["results"][0]["geometry"]["location"]
+    return location["lat"], location["lng"]
+
+
 # ---------- Sous-app 1 : Calcul principal ----------
 
 def app_calcul_principal():
@@ -117,7 +144,7 @@ def app_calcul_principal():
             st.write(result)
 
 
-# ---------- Sous-app 2 : Distance entre 2 adresses (voiture / transports) ----------
+# ---------- Sous-app 2 : Itinéraire entre 2 adresses ----------
 
 def app_distance_adresses():
     st.header("🗺️ Outil 2 – Itinéraire entre 2 adresses (Google Maps)")
@@ -214,6 +241,98 @@ def app_distance_adresses():
             st.write(f"→ lat = {end_loc['lat']:.6f}, lon = {end_loc['lng']:.6f}")
 
 
+# ---------- Sous-app 3 : Géocoder un fichier d'adresses ----------
+
+def app_geocode_excel():
+    st.header("📄 Outil 3 – Convertir un Excel d’adresses en coordonnées")
+
+    st.write(
+        "1. Charge un fichier Excel contenant une colonne d’adresses\n"
+        "2. Indique le nom de cette colonne (par ex. `Adresse` ou `Adresses`)\n"
+        "3. L’outil ajoute automatiquement deux colonnes : **Latitude** et **Longitude**"
+    )
+
+    uploaded_file = st.file_uploader(
+        "Importer un fichier Excel",
+        type=["xlsx", "xls"],
+        key="file_geocode_excel"
+    )
+
+    col_name = st.text_input(
+        "Nom de la colonne contenant les adresses",
+        value="Adresse",
+        key="addr_column_name"
+    )
+
+    if st.button("Lancer la conversion", key="btn_geocode_excel"):
+        if uploaded_file is None:
+            st.error("Merci d'importer un fichier Excel.")
+            return
+
+        if not col_name:
+            st.error("Merci d'indiquer le nom de la colonne d'adresses.")
+            return
+
+        try:
+            df = pd.read_excel(uploaded_file)
+        except Exception as e:
+            st.error(f"Erreur lors de la lecture du fichier Excel : {e}")
+            return
+
+        if col_name not in df.columns:
+            st.error(
+                f"La colonne '{col_name}' n'existe pas dans le fichier. "
+                f"Colonnes disponibles : {list(df.columns)}"
+            )
+            return
+
+        # On prépare les colonnes Latitude / Longitude
+        df["Latitude"] = None
+        df["Longitude"] = None
+
+        # Boucle de géocodage
+        addresses = df[col_name].astype(str).fillna("")
+        total = len(df)
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        for idx, addr in enumerate(addresses.index):
+            address_str = str(df.at[addr, col_name])
+            if address_str.strip() == "":
+                lat, lon = None, None
+            else:
+                lat, lon = geocode_google(address_str)
+
+            df.at[addr, "Latitude"] = lat
+            df.at[addr, "Longitude"] = lon
+
+            progress = (idx + 1) / total
+            progress_bar.progress(progress)
+            status_text.text(f"Géocodage : {idx + 1}/{total} lignes traitées")
+
+        progress_bar.empty()
+        status_text.empty()
+
+        st.success("Conversion terminée ✅")
+        st.subheader("Aperçu du fichier géocodé")
+        st.dataframe(df.head(20))
+
+        # Préparer un fichier Excel en mémoire pour le téléchargement
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Geocoded")
+        output.seek(0)
+
+        st.download_button(
+            label="📥 Télécharger le fichier Excel avec coordonnées",
+            data=output,
+            file_name="adresses_geocodees.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_geocoded_excel"
+        )
+
+
 # ---------- App principale avec menu ----------
 
 def main():
@@ -222,7 +341,12 @@ def main():
     st.sidebar.title("Menu")
     page = st.sidebar.radio(
         "Choisir une application",
-        ["🏠 Accueil", "🧮 Calcul principal", "🗺️ Itinéraire entre 2 adresses"]
+        [
+            "🏠 Accueil",
+            "🧮 Calcul principal",
+            "🗺️ Itinéraire entre 2 adresses",
+            "📄 Géocoder un fichier d’adresses",
+        ]
     )
 
     if page == "🏠 Accueil":
@@ -230,7 +354,8 @@ def main():
         st.write(
             "Choisis un outil dans le menu de gauche :\n"
             "- **🧮 Calcul principal** : outil avec paramètres + fichier Excel\n"
-            "- **🗺️ Itinéraire entre 2 adresses** : distance et durée en voiture ou en transports en commun\n"
+            "- **🗺️ Itinéraire entre 2 adresses** : distance & durée en voiture ou transports en commun\n"
+            "- **📄 Géocoder un fichier d’adresses** : ajoute Latitude/Longitude à un Excel"
         )
 
     elif page == "🧮 Calcul principal":
@@ -238,6 +363,9 @@ def main():
 
     elif page == "🗺️ Itinéraire entre 2 adresses":
         app_distance_adresses()
+
+    elif page == "📄 Géocoder un fichier d’adresses":
+        app_geocode_excel()
 
 
 if __name__ == "__main__":
