@@ -332,6 +332,237 @@ def app_geocode_excel():
             key="download_geocoded_excel"
         )
 
+def app_matrice_agences():
+    st.header("🏢 Outil 4 – Matrice de trajets entre agences")
+
+    st.write(
+        "1. Charge un fichier Excel avec une colonne d’adresses\n"
+        "2. Optionnel : indique une colonne de noms d’agence\n"
+        "3. Choisis le mode (voiture, transports, ou le plus rapide)\n"
+        "4. L’outil calcule tous les trajets entre toutes les agences (y compris agence → elle-même)"
+    )
+
+    uploaded_file = st.file_uploader(
+        "Importer un fichier Excel d’agences",
+        type=["xlsx", "xls"],
+        key="file_matrice_agences"
+    )
+
+    col_addr = st.text_input(
+        "Nom de la colonne contenant les adresses",
+        value="Adresse",
+        key="addr_col_matrice"
+    )
+
+    has_name = st.checkbox(
+        "Mon fichier contient une colonne Nom d’agence",
+        value=True,
+        key="has_name_matrice"
+    )
+
+    col_name = None
+    if has_name:
+        col_name = st.text_input(
+            "Nom de la colonne contenant le nom d’agence",
+            value="Nom_agence",
+            key="name_col_matrice"
+        )
+
+    mode_label = st.selectbox(
+        "Mode de calcul",
+        [
+            "🚗 Voiture",
+            "🚆 Transports en commun",
+            "⚡ Le plus rapide (voiture ou transports)"
+        ],
+        index=0,
+        key="mode_matrice"
+    )
+
+    if "Voiture" in mode_label:
+        global_mode = "driving_only"
+    elif "Transports" in mode_label:
+        global_mode = "transit_only"
+    else:
+        global_mode = "fastest"
+
+    if st.button("Lancer le calcul de la matrice", key="btn_matrice_agences"):
+        if uploaded_file is None:
+            st.error("Merci d’importer un fichier Excel.")
+            return
+
+        if not col_addr:
+            st.error("Merci d’indiquer le nom de la colonne d’adresses.")
+            return
+
+        try:
+            df = pd.read_excel(uploaded_file)
+        except Exception as e:
+            st.error(f"Erreur lors de la lecture du fichier : {e}")
+            return
+
+        if col_addr not in df.columns:
+            st.error(
+                f"La colonne d’adresses '{col_addr}' n’existe pas. "
+                f"Colonnes disponibles : {list(df.columns)}"
+            )
+            return
+
+        if has_name and (col_name not in df.columns):
+            st.error(
+                f"La colonne de noms '{col_name}' n’existe pas. "
+                f"Colonnes disponibles : {list(df.columns)}"
+            )
+            return
+
+        # On prépare une petite table des agences
+        work = df[[col_addr]].copy()
+        if has_name:
+            work[col_name] = df[col_name]
+            work["Label"] = df[col_name].astype(str)
+        else:
+            work["Label"] = df[col_addr].astype(str)
+
+        work = work.reset_index(drop=True)
+        n = len(work)
+
+        if n == 0:
+            st.error("Aucune ligne à traiter dans le fichier.")
+            return
+
+        st.info(f"{n} agences détectées. Calcul de {n*n} paires (y compris agence → elle-même).")
+
+        rows = []
+        total_pairs = n * n
+        done = 0
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        for i in range(n):
+            origin_label = work.at[i, "Label"]
+            origin_addr = work.at[i, col_addr]
+
+            for j in range(n):
+                dest_label = work.at[j, "Label"]
+                dest_addr = work.at[j, col_addr]
+
+                # Toujours inclure les paires i == j (distance 0, temps 0)
+                if i == j:
+                    rows.append({
+                        "Agence_origine": origin_label,
+                        "Agence_destination": dest_label,
+                        "Adresse_origine": origin_addr,
+                        "Adresse_destination": dest_addr,
+                        "Mode": "Même point" if global_mode == "fastest"
+                                else ("Voiture" if global_mode == "driving_only" else "Transports"),
+                        "Distance_km": 0.0,
+                        "Duree_min": 0.0,
+                    })
+                else:
+                    # Selon le mode global : une seule API, ou comparaison des deux
+                    if global_mode == "driving_only":
+                        res = directions_google(origin_addr, dest_addr, mode="driving")
+                        if res.get("ok"):
+                            rows.append({
+                                "Agence_origine": origin_label,
+                                "Agence_destination": dest_label,
+                                "Adresse_origine": origin_addr,
+                                "Adresse_destination": dest_addr,
+                                "Mode": "Voiture",
+                                "Distance_km": res["distance_km"],
+                                "Duree_min": res["duration_min"],
+                            })
+                        else:
+                            rows.append({
+                                "Agence_origine": origin_label,
+                                "Agence_destination": dest_label,
+                                "Adresse_origine": origin_addr,
+                                "Adresse_destination": dest_addr,
+                                "Mode": "Voiture",
+                                "Distance_km": None,
+                                "Duree_min": None,
+                            })
+
+                    elif global_mode == "transit_only":
+                        res = directions_google(origin_addr, dest_addr, mode="transit")
+                        if res.get("ok"):
+                            rows.append({
+                                "Agence_origine": origin_label,
+                                "Agence_destination": dest_label,
+                                "Adresse_origine": origin_addr,
+                                "Adresse_destination": dest_addr,
+                                "Mode": "Transports",
+                                "Distance_km": res["distance_km"],
+                                "Duree_min": res["duration_min"],
+                            })
+                        else:
+                            rows.append({
+                                "Agence_origine": origin_label,
+                                "Agence_destination": dest_label,
+                                "Adresse_origine": origin_addr,
+                                "Adresse_destination": dest_addr,
+                                "Mode": "Transports",
+                                "Distance_km": None,
+                                "Duree_min": None,
+                            })
+
+                    else:  # fastest
+                        res_drive = directions_google(origin_addr, dest_addr, mode="driving")
+                        res_transit = directions_google(origin_addr, dest_addr, mode="transit")
+
+                        best_mode = None
+                        best_dist = None
+                        best_dur = None
+
+                        if res_drive.get("ok"):
+                            best_mode = "Voiture"
+                            best_dist = res_drive["distance_km"]
+                            best_dur = res_drive["duration_min"]
+
+                        if res_transit.get("ok"):
+                            if best_dur is None or res_transit["duration_min"] < best_dur:
+                                best_mode = "Transports"
+                                best_dist = res_transit["distance_km"]
+                                best_dur = res_transit["duration_min"]
+
+                        rows.append({
+                            "Agence_origine": origin_label,
+                            "Agence_destination": dest_label,
+                            "Adresse_origine": origin_addr,
+                            "Adresse_destination": dest_addr,
+                            "Mode": best_mode,          # Voiture / Transports / None si rien trouvé
+                            "Distance_km": best_dist,
+                            "Duree_min": best_dur,
+                        })
+
+                done += 1
+                progress_bar.progress(done / total_pairs)
+                status_text.text(f"Paires calculées : {done}/{total_pairs}")
+
+        progress_bar.empty()
+        status_text.empty()
+
+        result_df = pd.DataFrame(rows)
+
+        st.success("Matrice de trajets calculée ✅")
+        st.subheader("Aperçu")
+        st.dataframe(result_df.head(50))
+
+        # Export Excel
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            result_df.to_excel(writer, index=False, sheet_name="Matrice_trajets")
+        output.seek(0)
+
+        st.download_button(
+            label="📥 Télécharger la matrice des trajets (Excel)",
+            data=output,
+            file_name="matrice_trajets_agences.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_matrice_agences"
+        )
+
+
 
 # ---------- App principale avec menu ----------
 
@@ -346,6 +577,7 @@ def main():
             "🧮 Calcul principal",
             "🗺️ Itinéraire entre 2 adresses",
             "📄 Géocoder un fichier d’adresses",
+            "🏢 Matrice de trajets entre agences",
         ]
     )
 
@@ -366,6 +598,9 @@ def main():
 
     elif page == "📄 Géocoder un fichier d’adresses":
         app_geocode_excel()
+
+    elif page == "🏢 Matrice de trajets entre agences":
+        app_matrice_agences()
 
 
 if __name__ == "__main__":
