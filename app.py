@@ -733,27 +733,67 @@ def app_zones_chalandise():
     )
 
     st.sidebar.subheader("Paramètres des zones (outil 6)")
-    rayon_urbain = st.sidebar.number_input(
-        "Rayon urbain (km)",
+
+    st.sidebar.markdown("### Distances par type d’environnement")
+
+    rayon_com_200 = st.sidebar.number_input(
+        "Com > 200 m habts (km)",
+        min_value=0.5,
+        max_value=10.0,
+        value=1.0,
+        step=0.5,
+    )
+
+    rayon_com_200m = st.sidebar.number_input(
+        "Com < 200 m habts (km)",
         min_value=0.5,
         max_value=20.0,
         value=2.0,
         step=0.5,
-        key="rayon_urbain_zones",
-    )
-    rayon_rural = st.sidebar.number_input(
-        "Rayon rural (km)",
-        min_value=1.0,
-        max_value=50.0,
-        value=10.0,
-        step=1.0,
-        key="rayon_rural_zones",
     )
 
+    rayon_com_50 = st.sidebar.number_input(
+        "Com < 50 m habts (km)",
+        min_value=0.5,
+        max_value=20.0,
+        value=3.0,
+        step=0.5,
+    )
+
+    rayon_com_10 = st.sidebar.number_input(
+        "Com < 10 m habts (km)",
+        min_value=0.5,
+        max_value=30.0,
+        value=5.0,
+        step=0.5,
+    )
+
+    rayon_rurale_2000plus = st.sidebar.number_input(
+        "Com rurale > 2 000 habts (km)",
+        min_value=1.0,
+        max_value=50.0,
+        value=7.0,
+        step=1.0,
+    )
+
+    rayon_rurale_2000moins = st.sidebar.number_input(
+        "Com rurale < 2 000 habts (km)",
+        min_value=1.0,
+        max_value=50.0,
+        value=9.0,
+        step=1.0,
+    )
+
+    # 🔥 Nouveau env_params utilisé par zones_core_km.py
     env_params = {
-        "urbain": {"rayon_km": float(rayon_urbain)},
-        "rural": {"rayon_km": float(rayon_rural)},
+        "Com > 200 m habts":          {"rayon_km": float(rayon_com_200)},
+        "Com < 200 m habts":          {"rayon_km": float(rayon_com_200m)},
+        "Com < 50 m habts":           {"rayon_km": float(rayon_com_50)},
+        "Com < 10 m habts":           {"rayon_km": float(rayon_com_10)},
+        "Com rurale > 2 000 habts":   {"rayon_km": float(rayon_rurale_2000plus)},
+        "Com rurale < 2 000 habts":   {"rayon_km": float(rayon_rurale_2000moins)},
     }
+
 
     st.subheader("1️⃣ Importer le fichier de relais")
     uploaded_file = st.file_uploader(
