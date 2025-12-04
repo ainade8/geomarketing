@@ -10,6 +10,7 @@ from math import radians, sin, cos, sqrt, atan2
 
 from tqdm.auto import tqdm
 import folium
+import os
 
 
 # -------------------------------------------------------------------
@@ -352,6 +353,11 @@ def compute_zones_for_relais(
     # Spatial join pour récupérer l’IRIS de chaque relais
     print("🧩 Attribution des IRIS aux relais (spatial join)...")
     iris_geom = iris_socio_gdf[[iris_code_col, "geometry"]].copy()
+
+    # S'assurer aussi que les IRIS sont dans le même CRS que les points
+    if iris_geom.crs != points_gdf.crs:
+        iris_geom = iris_geom.to_crs(points_gdf.crs)
+
     points_with_iris = gpd.sjoin(
         points_gdf,
         iris_geom,
@@ -360,10 +366,27 @@ def compute_zones_for_relais(
     )
 
     points_with_iris = points_with_iris.rename(columns={iris_code_col: "code_iris_point"})
-    if points_with_iris["code_iris_point"].isna().any():
-        n_na = points_with_iris["code_iris_point"].isna().sum()
+
+    # --- Diagnostic des points sans IRIS ---
+    mask_na = points_with_iris["code_iris_point"].isna()
+    n_na = mask_na.sum()
+    if n_na > 0:
         print(f"⚠️ {n_na} relais n'ont pas d'IRIS associé (en dehors des polygones).")
 
+        sans_iris = points_with_iris[mask_na].copy()
+        cols_diag = [c for c in [
+            "Code agence", "Nom d'enseigne", "Adresse", "Commune",
+            "Code postal", "Latitude", "Longitude"
+        ] if c in sans_iris.columns]
+
+        print("=== Aperçu des points sans IRIS ===")
+        print(sans_iris[cols_diag].head(20))
+
+        os.makedirs("output", exist_ok=True)
+        sans_iris[cols_diag].to_excel("output/relais_sans_iris.xlsx", index=False)
+        print("📁 Exporté dans output/relais_sans_iris.xlsx")
+
+    # On supprime ensuite les points sans IRIS
     points_with_iris = points_with_iris.dropna(subset=["code_iris_point"])
 
     # Groupes (IRIS centre + statut)
@@ -412,25 +435,24 @@ def compute_zones_for_relais(
     print("📊 Agrégation par IRIS couvert...")
     iris_zone_all = pd.concat(iris_zone_rows, ignore_index=True)
 
+    # Nb de zones (tous statuts confondus)
     counts_total = (
         iris_zone_all.groupby(iris_code_col)["code_iris_centre"]
         .nunique()
         .rename("nb_zones_total")
     )
-    urbain = (
-        iris_zone_all[iris_zone_all["env"].astype(str).str.lower() == "urbain"]
-        .groupby(iris_code_col)["code_iris_centre"]
-        .nunique()
-        .rename("nb_zones_urbain")
-    )
-    rural = (
-        iris_zone_all[iris_zone_all["env"].astype(str).str.lower() == "rural"]
-        .groupby(iris_code_col)["code_iris_centre"]
-        .nunique()
-        .rename("nb_zones_rural")
-    )
 
-    # Base IRIS : toutes les colonnes socio (sauf geometry), une ligne par CODE_IRIS
+    # Nb de zones par type d'environnement (tes libellés)
+    env_counts = (
+        iris_zone_all
+        .groupby([iris_code_col, "env"])["code_iris_centre"]
+        .nunique()
+        .unstack(fill_value=0)
+    )
+    # Colonnes du type nb_zones_Com > 200 m habts, etc.
+    env_counts.columns = [f"nb_zones_{str(c)}" for c in env_counts.columns]
+
+    # Base IRIS : toutes les colonnes socio
     base_iris = (
         iris_socio_gdf
         .drop(columns=["geometry"])
@@ -439,28 +461,28 @@ def compute_zones_for_relais(
     )
 
     iris_agg_df = base_iris.join(counts_total, how="left")
-    iris_agg_df = iris_agg_df.join(urbain, how="left")
-    iris_agg_df = iris_agg_df.join(rural, how="left")
+    iris_agg_df = iris_agg_df.join(env_counts, how="left")
 
     iris_agg_df["nb_zones_total"] = iris_agg_df["nb_zones_total"].fillna(0).astype(int)
-    iris_agg_df["nb_zones_urbain"] = iris_agg_df["nb_zones_urbain"].fillna(0).astype(int)
-    iris_agg_df["nb_zones_rural"] = iris_agg_df["nb_zones_rural"].fillna(0).astype(int)
+    for c in env_counts.columns:
+        iris_agg_df[c] = iris_agg_df[c].fillna(0).astype(int)
 
-    def _class_env(row):
-        u = row["nb_zones_urbain"]
-        r = row["nb_zones_rural"]
-        if u == 0 and r == 0:
+    # Type_env_iris = catégorie dominante (celle avec le plus de zones)
+    def _type_env(row):
+        if row["nb_zones_total"] == 0:
             return "Non couverte"
-        if u > 0 and r == 0:
-            return "Urbain"
-        if u == 0 and r > 0:
-            return "Rural"
-        return "Mixte"
+        env_cols = [c for c in row.index if c.startswith("nb_zones_") and c != "nb_zones_total"]
+        if not env_cols:
+            return "Non couverte"
+        sub = row[env_cols]
+        col_max = sub.idxmax()           # ex: "nb_zones_Com > 200 m habts"
+        return col_max.replace("nb_zones_", "")
 
-    iris_agg_df["type_env_iris"] = iris_agg_df.apply(_class_env, axis=1)
+    iris_agg_df["type_env_iris"] = iris_agg_df.apply(_type_env, axis=1)
 
     # Ne garder que les IRIS effectivement couverts
     iris_agg_df = iris_agg_df[iris_agg_df["nb_zones_total"] > 0].reset_index()
+
 
     # Stats globales sur tous les IRIS couverts
     iris_couverts = iris_agg_df[iris_code_col].unique()
@@ -485,9 +507,14 @@ if __name__ == "__main__":
 
     # Paramètres de rayon par type de zone (en km)
     env_params = {
-        "urbain": {"rayon_km": 2.0},
-        "rural": {"rayon_km": 10.0},
+    "com > 200 m habts":      {"rayon_km": 1.0},
+    "com < 200 m habts":      {"rayon_km": 2.0},
+    "com < 50 m habts":       {"rayon_km": 3.0},
+    "com < 10 m habts":       {"rayon_km": 5.0},
+    "com rurale > 2 000 habts":  {"rayon_km": 7.0},
+    "com rurale < 2 000 m habts": {"rayon_km": 9.0},
     }
+
 
     res = compute_zones_for_relais(
         points_gdf=points_gdf,
@@ -520,9 +547,13 @@ if __name__ == "__main__":
 
     print("🗺️ Construction de la carte Folium...")
 
-    # On récupère seulement les IRIS couverts, avec leur type_env_iris et nb_zones_total
+    # Colonnes dispo pour la jointure carte
+    base_cols = ["CODE_IRIS", "nb_zones_total", "type_env_iris"]
+    cols_dispo = [c for c in base_cols if c in iris_agg_df.columns]
+
+    # On ne garde que les IRIS couverts
     iris_map_gdf = iris_gdf.merge(
-        iris_agg_df[["CODE_IRIS", "nb_zones_total", "nb_zones_urbain", "nb_zones_rural", "type_env_iris"]],
+        iris_agg_df[cols_dispo],
         on="CODE_IRIS",
         how="right",  # right = on garde seulement les IRIS couverts
     )
@@ -533,15 +564,21 @@ if __name__ == "__main__":
     # Centre de la carte = France
     m = folium.Map(location=[46.5, 2.5], zoom_start=6, tiles="cartodbpositron")
 
-    # Style des polygones en fonction du type d'environnement
+    # Style des polygones en fonction du type d'environnement (catégorie dominante)
     def style_function(feature):
         env = feature["properties"].get("type_env_iris")
-        color = {
-            "Urbain": "#e41a1c",
-            "Rural": "#377eb8",
-            "Mixte": "#4daf4a",
-            "Non couverte": "#999999",
-        }.get(env, "#999999")
+
+        color_map = {
+            "Com > 200 m habts":          "#d73027",
+            "Com < 200 m habts":          "#fc8d59",
+            "Com < 50 m habts":           "#fee08b",
+            "Com < 10 m habts":           "#d9ef8b",
+            "Com rurale > 2 000 habts":   "#91bfdb",
+            "Com rurale < 2 000 m habts": "#4575b4",
+            "Non couverte":               "#bdbdbd",
+        }
+        color = color_map.get(env, "#bdbdbd")
+
         return {
             "fillColor": color,
             "color": color,
@@ -550,9 +587,10 @@ if __name__ == "__main__":
         }
 
     # Tooltip sur les IRIS
+    tooltip_fields = [c for c in ["CODE_IRIS", "type_env_iris", "nb_zones_total"] if c in iris_map_gdf.columns]
     tooltip = folium.GeoJsonTooltip(
-        fields=["CODE_IRIS", "type_env_iris", "nb_zones_total"],
-        aliases=["IRIS", "Type environnement", "Nb zones couvrant l'IRIS"],
+        fields=tooltip_fields,
+        aliases=["IRIS", "Type environnement", "Nb zones couvrant l'IRIS"][: len(tooltip_fields)],
         localize=True,
         sticky=False,
     )
@@ -564,8 +602,14 @@ if __name__ == "__main__":
         name="IRIS couverts",
     ).add_to(m)
 
+    # S'assurer que les points sont aussi en WGS84 pour la carte
+    if points_gdf.crs is None:
+        points_plot = points_gdf.set_crs(4326)
+    else:
+        points_plot = points_gdf.to_crs(4326)
+
     # Ajout des relais comme petits points
-    for _, row in points_gdf.iterrows():
+    for _, row in points_plot.iterrows():
         folium.CircleMarker(
             location=[row.geometry.y, row.geometry.x],
             radius=3,
@@ -576,6 +620,12 @@ if __name__ == "__main__":
         ).add_to(m)
 
     folium.LayerControl().add_to(m)
+
+    # Sauvegarde
+    os.makedirs("output", exist_ok=True)
+    m.save("output/zones_chalandise.html")
+    print("✅ Carte Folium exportée dans output/zones_chalandise.html")
+
 
     # Export HTML
     map_path = OUTPUTS_DIR / "resultats_zones_km.html"
