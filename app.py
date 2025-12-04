@@ -15,8 +15,36 @@ from test import calcul_principal  # ton module métier
 
 import gdown
 import os
+from pathlib import Path
+
 
 # ---------- Utilitaires zone de chalandise ----------
+
+
+ROOT = Path(__file__).resolve().parent
+INPUTS_DIR = ROOT / "inputs"
+
+def ensure_iris_shapes():
+    """
+    Vérifie que inputs/iris_shapes.gpkg existe.
+    Si non, le télécharge depuis Google Drive (ton lien).
+    """
+    INPUTS_DIR.mkdir(exist_ok=True)
+
+    local_path = INPUTS_DIR / "iris_shapes.gpkg"
+    if local_path.exists():
+        return local_path
+
+    # Ton fichier Drive
+    file_id = "1brt9p_W5Gpa6dX1rm21vIjKcxGfAmepW"
+    url = f"https://drive.google.com/uc?id={file_id}"
+
+    print("📥 Téléchargement de iris_shapes.gpkg depuis Google Drive…")
+    gdown.download(url, str(local_path), quiet=False)
+
+    return local_path
+
+
 def get_iris_shapes():
     url = "https://drive.google.com/uc?id=1brt9p_W5Gpa6dX1rm21vIjKcxGfAmepW"
     local_path = "inputs/iris_shapes.gpkg"
@@ -50,15 +78,22 @@ def build_folium_map(iris_gdf: gpd.GeoDataFrame,
     iris_map_gdf = iris_map_gdf.to_crs(4326)
 
     m = folium.Map(location=[46.5, 2.5], zoom_start=6, tiles="cartodbpositron")
-
+    
     def style_function(feature):
         env = feature["properties"].get("type_env_iris")
-        color = {
-            "Urbain": "#e41a1c",
-            "Rural": "#377eb8",
-            "Mixte": "#4daf4a",
-            "Non couverte": "#999999",
-        }.get(env, "#999999")
+
+        color_map = {
+            "Com > 200 m habts":         "#d73027",  # très urbain
+            "Com < 200 m habts":         "#fc8d59",
+            "Com < 50 m habts":          "#fee08b",
+            "Com < 10 m habts":          "#d9ef8b",
+            "Com rurale > 2 000 habts":  "#91bfdb",
+            "Com rurale < 2 000 m habts":"#4575b4",
+            "Non couverte":              "#bdbdbd",
+        }
+
+        color = color_map.get(env, "#bdbdbd")
+
         return {
             "fillColor": color,
             "color": color,
@@ -113,10 +148,12 @@ def haversine_distance(lat1, lon1, lat2, lon2):
 
 @st.cache_resource
 def load_iris_cached():
+    iris_shapes_path = ensure_iris_shapes()
     return zkm.load_iris_data(
-        iris_geom_path="inputs/iris_shapes.gpkg",
-        iris_joint_path="inputs/iris_joint.xlsx",
+        iris_geom_path=iris_shapes_path,
+        iris_joint_path=INPUTS_DIR / "iris_joint.xlsx",
     )
+
 
 @st.cache_data(show_spinner=False)
 def directions_google(origin: str, destination: str, mode: str = "driving"):
