@@ -60,9 +60,6 @@ def get_iris_shapes():
 
     return local_path
 
-iris_shapes_path = get_iris_shapes()
-iris_gdf = gpd.read_file(iris_shapes_path)
-
 
 
 # ---------- Utilitaires communs ----------
